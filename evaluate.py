@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # import cv2
-# import numpy as np
+import numpy as np
 # import torch
 import yaml
 
@@ -438,5 +438,8 @@ if __name__ == "__main__":
     # print(EXP_OBJ.width)
 
     yolox_node = YOLOXNode(CONFIG)
+    image = np.array([0])
+    inputs = {"img": image}
+    yolox_node.run(inputs)
 
     # main(EXP_OBJ, CONFIG)

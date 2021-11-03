@@ -1,0 +1,24 @@
+# experiment_name: null
+model_files:
+  {
+    yolox-tiny: ../peekingduck_weights/yolox/yolox-tiny.pth,
+    yolox-l: ../peekingduck_weights/yolox/yolox-l.pth,
+  }
+num_classes: 80
+
+model_type: yolox-l
+input_size: 416
+detect_ids: [0]
+iou_threshold: 0.45
+score_threshold: 0.25
+
+device: gpu
+# save_result: true
+
+# ckpt: weights/yolox_l.pth
+# exp_file: null
+
+# fp16: false
+# fuse: false
+# legacy: false
+# trt: false

@@ -36,6 +36,4 @@ class YOLOXModel:
     def predict(self, image):
         if not isinstance(image, np.ndarray):
             raise TypeError("image must be a np.ndarray")
-        return self.detector.predict_object_bbox_from_image(
-            image, self.class_names, self.detect_ids
-        )
+        return self.detector.predict_object_bbox_from_image(image, self.class_names)

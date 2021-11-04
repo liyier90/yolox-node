@@ -8,5 +8,7 @@ class Node:
         self.model = yolox_model.YOLOXModel(self.config)
 
     def run(self, inputs):
-        ret = self.model.predict(inputs["img"])
-        return ret
+        bboxes, labels, scores = self.model.predict(inputs["img"])
+        outputs = {"bboxes": bboxes, "bbox_labels": labels, "bbox_scores": scores}
+
+        return outputs

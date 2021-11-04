@@ -183,10 +183,23 @@ if __name__ == "__main__":
     cv2.imwrite(str(CONFIG["output_dir"] / "before_frame.jpg"), frame)
     inputs = {"img": frame}
 
+    # print(frame.shape)
+    # frame = frame.transpose(2, 0, 1)
+    # print(frame.shape)
     yolox_node = YOLOXNode(CONFIG)
     outputs, ratio = yolox_node.run(inputs)
 
-    result_frame = visualize(outputs[0], frame.copy(), ratio, yolox_node.model.class_names)
+    result_frame = visualize(
+        outputs[0], frame.copy(), ratio, yolox_node.model.class_names
+    )
     cv2.imwrite(str(CONFIG["output_dir"] / "after_frame.jpg"), result_frame)
 
-    # main(EXP_OBJ, CONFIG)
+    # import time
+    # start_time = time.time()
+    # for _ in range(100000):
+    #     # padded_img = 114 * np.ones((416, 416, 3), dtype=np.uint8)
+    #     padded_img2 = np.full((416, 416, 3), 114, dtype=np.uint8)
+    # print(time.time() - start_time)
+    # print(padded_img)
+    # print(padded_img2)
+    # print((padded_img == padded_img2).all())

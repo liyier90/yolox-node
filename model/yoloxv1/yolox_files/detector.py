@@ -9,6 +9,8 @@ from .yolo_pafpn import YOLOPAFPN
 from .yolox_head import YOLOXHead
 from .yolox import YOLOX
 
+NUM_CHANNELS = 3
+
 
 class Detector:
     def __init__(self, config):
@@ -19,10 +21,8 @@ class Detector:
         self.root_dir = config["root"]
         self.yolox = self._create_yolox_model()
 
-    def predict_object_bbox_from_image(self, class_names, image, detect_ids):
-        height, width = image.shape[:2]
-        ratio = min(self.input_res[0] / height, self.input_res[1] / width)
-        image = self._preprocess_image(image)
+    def predict_object_bbox_from_image(self, image, class_names, detect_ids):
+        image, scale = self._preprocess_image(image)
         image = torch.from_numpy(image).unsqueeze(0)
         image = image.float()
         if self.config["use_gpu"]:
@@ -31,12 +31,12 @@ class Detector:
                 image = image.half()
         with torch.no_grad():
             predictions = self.yolox(image)
-            predictions = self._postprocess_predictions(predictions)
+            predictions = self._postprocess_predictions(predictions, scale)
 
-        return predictions, ratio
+        return predictions, scale
 
     def _create_yolox_model(self):
-        self.input_res = (self.config["input_size"], self.config["input_size"])
+        self.input_size = (self.config["input_size"], self.config["input_size"])
         model_type = self.config["model_type"]
         model_path = (self.root_dir / self.config["model_files"][model_type]).resolve()
         model_sizes = self.config["model_sizes"][model_type]
@@ -52,7 +52,7 @@ class Detector:
                 "Score threshold: %s\n\t"
             ),
             self.config["model_type"],
-            self.input_res,
+            self.input_size,
             self.config["detect_ids"],
             self.config["iou_threshold"],
             self.config["score_threshold"],
@@ -86,7 +86,7 @@ class Detector:
             "Model file does not exist. Please check that %s exists." % model_path
         )
 
-    def _postprocess_predictions(self, predictions):
+    def _postprocess_predictions(self, predictions, scale):
         # xywh to xyxy
         bboxes = torch.empty_like(predictions)
         bboxes[:, :, 0] = predictions[:, :, 0] - predictions[:, :, 2] / 2
@@ -132,23 +132,24 @@ class Detector:
 
         return outputs
 
-    def _preprocess_image(self, image, swap=(2, 0, 1)):
-        print(self.input_res)
-        if len(image.shape) == 3:
-            padded_img = (
-                np.ones((self.input_res[0], self.input_res[1], 3), dtype=np.uint8) * 114
-            )
-        else:
-            padded_img = np.ones(self.input_res, dtype=np.uint8) * 114
-
-        r = min(self.input_res[0] / image.shape[0], self.input_res[1] / image.shape[1])
+    def _preprocess_image(self, image):
+        # Initialize canvas for padded image as gray
+        padded_img = np.full(
+            (self.input_size[0], self.input_size[1], NUM_CHANNELS), 114, dtype=np.uint8
+        )
+        scale = min(
+            self.input_size[0] / image.shape[0], self.input_size[1] / image.shape[1]
+        )
+        scaled_height = int(image.shape[0] * scale)
+        scaled_width = int(image.shape[1] * scale)
         resized_img = cv2.resize(
             image,
-            (int(image.shape[1] * r), int(image.shape[0] * r)),
+            (scaled_width, scaled_height),
             interpolation=cv2.INTER_LINEAR,
         ).astype(np.uint8)
-        padded_img[: int(image.shape[0] * r), : int(image.shape[1] * r)] = resized_img
+        padded_img[:scaled_height, :scaled_width] = resized_img
 
-        padded_img = padded_img.transpose(swap)
+        # Rearrange from (H, W, C) to (C, H, W)
+        padded_img = padded_img.transpose((2, 0, 1))
         padded_img = np.ascontiguousarray(padded_img, dtype=np.float32)
-        return padded_img
+        return padded_img, scale

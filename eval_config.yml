@@ -1,4 +1,3 @@
-# experiment_name: null
 classes: ../peekingduck_weights/yolox/coco.names
 model_files:
   {
@@ -11,6 +10,7 @@ model_sizes:
     yolox-l: { depth: 1.0, width: 1.0 },
   }
 num_classes: 80
+weights_dir: ../peekingduck_weights/yolox
 
 model_type: yolox-l
 input_size: 416

@@ -3,6 +3,7 @@ import logging
 import cv2
 import numpy as np
 import torch
+import torchvision
 
 from .yolo_pafpn import YOLOPAFPN
 from .yolox_head import YOLOXHead
@@ -19,6 +20,8 @@ class Detector:
         self.yolox = self._create_yolox_model()
 
     def predict_object_bbox_from_image(self, class_names, image, detect_ids):
+        height, width = image.shape[:2]
+        ratio = min(self.input_res[0] / height, self.input_res[1] / width)
         image = self._preprocess_image(image)
         image = torch.from_numpy(image).unsqueeze(0)
         image = image.float()
@@ -27,7 +30,10 @@ class Detector:
             if self.config["fp16"]:
                 image = image.half()
         with torch.no_grad():
-            outputs = self.yolox(image)
+            predictions = self.yolox(image)
+            predictions = self._postprocess_predictions(predictions)
+
+        return predictions, ratio
 
     def _create_yolox_model(self):
         self.input_res = (self.config["input_size"], self.config["input_size"])
@@ -80,19 +86,62 @@ class Detector:
             "Model file does not exist. Please check that %s exists." % model_path
         )
 
+    def _postprocess_predictions(self, predictions):
+        # xywh to xyxy
+        bboxes = torch.empty_like(predictions)
+        bboxes[:, :, 0] = predictions[:, :, 0] - predictions[:, :, 2] / 2
+        bboxes[:, :, 1] = predictions[:, :, 1] - predictions[:, :, 3] / 2
+        bboxes[:, :, 2] = predictions[:, :, 0] + predictions[:, :, 2] / 2
+        bboxes[:, :, 3] = predictions[:, :, 1] + predictions[:, :, 3] / 2
+        predictions[:, :, :4] = bboxes[:, :, :4]
+
+        outputs = [None for _ in range(len(predictions))]
+        for i, prediction in enumerate(predictions):
+            # If none are remaining => process next image
+            if not prediction.size(0):
+                continue
+            # Get score and class with highest confidence
+            class_score, class_pred = torch.max(
+                prediction[:, 5 : 5 + self.config["num_classes"]], 1, keepdim=True
+            )
+
+            conf_mask = (
+                prediction[:, 4] * class_score.squeeze()
+                >= self.config["score_threshold"]
+            ).squeeze()
+            # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred)
+            detections = torch.cat(
+                (prediction[:, :5], class_score, class_pred.float()), 1
+            )
+            detections = detections[conf_mask]
+            if not detections.size(0):
+                continue
+
+            # Class agnostic NMS
+            nms_out_index = torchvision.ops.nms(
+                detections[:, :4],
+                detections[:, 4] * detections[:, 5],
+                self.config["iou_threshold"],
+            )
+
+            detections = detections[nms_out_index]
+            if outputs[i] is None:
+                outputs[i] = detections
+            else:
+                outputs[i] = torch.cat((outputs[i], detections))
+
+        return outputs
+
     def _preprocess_image(self, image, swap=(2, 0, 1)):
         print(self.input_res)
         if len(image.shape) == 3:
             padded_img = (
-                np.ones((self.input_res[0], self.input_res[1], 3), dtype=np.uint8)
-                * 114
+                np.ones((self.input_res[0], self.input_res[1], 3), dtype=np.uint8) * 114
             )
         else:
             padded_img = np.ones(self.input_res, dtype=np.uint8) * 114
 
-        r = min(
-            self.input_res[0] / image.shape[0], self.input_res[1] / image.shape[1]
-        )
+        r = min(self.input_res[0] / image.shape[0], self.input_res[1] / image.shape[1])
         resized_img = cv2.resize(
             image,
             (int(image.shape[1] * r), int(image.shape[0] * r)),

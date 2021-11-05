@@ -20,7 +20,5 @@ input_size: 416
 detect_ids: [0]
 iou_threshold: 0.45
 score_threshold: 0.25
-
-fp16: false
+half: false
 fuse: false
-use_gpu: true

@@ -1,3 +1,17 @@
+# Copyright 2021 AI Singapore
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """YOLOX models with model types: yolox-tiny, yolox-s, yolox-m, yolox-l"""
 
 from typing import Any, Dict, List, Tuple
@@ -25,8 +39,6 @@ class YOLOXModel:
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        print(__name__)
-
         # Check threshold values
         if not 0 <= config["score_threshold"] <= 1:
             raise ValueError("score_threshold must be in [0, 1]")

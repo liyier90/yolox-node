@@ -1,19 +1,55 @@
-"""Modifications include:
+# Modifications copyright 2021 AI Singapore
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Original copyright 2021 Megvii, Base Detection
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""YOLOX model with its backbone (YOLOFAPN) and head (YOLOXHead).
+
+Modifications include:
 - YOLOX
     - Uses only YOLOPAFPN as backbone
     - Uses only YOLOHead as head
 - YOLOPAFPN
+    - Refactor arguments name
 - YOLOXHead
     - Uses range based loop to iterate through in_channels
     - Removed training-related code and arguments
+        - Code under the `if self.training` scope
+        - get_output_and_grid() and initialize_biases() methods
 """
-import math
+
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
 
 from .darknet import CSPDarknet
 from .network_blocks import BaseConv, CSPLayer, DWConv
+
+IN_CHANNELS = [256, 512, 1024]
 
 
 class YOLOX(nn.Module):
@@ -25,18 +61,18 @@ class YOLOX(nn.Module):
 
     def __init__(
         self,
-        num_classes,
-        depth,
-        width,
-        in_channels=[256, 512, 1024],
-    ):
+        num_classes: int,
+        depth: float,
+        width: float,
+    ) -> None:
         super().__init__()
-        self.backbone = YOLOPAFPN(depth, width, in_channels=in_channels)
-        self.head = YOLOXHead(num_classes, width, in_channels=in_channels)
+        self.backbone = YOLOPAFPN(depth, width, in_channels=IN_CHANNELS)
+        self.head = YOLOXHead(num_classes, width, in_channels=IN_CHANNELS)
 
-    def forward(self, x):
-        # fpn output content features of [dark3, dark4, dark5]
-        fpn_outs = self.backbone(x)
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Defines the computation performed at every call"""
+        # FPN output content features of [dark3, dark4, dark5]
+        fpn_outs = self.backbone(inputs)
         return self.head(fpn_outs)
 
 
@@ -45,6 +81,7 @@ class YOLOPAFPN(nn.Module):
     YOLOv3 model. Darknet 53 is the default backbone of this model.
     """
 
+    # pylint: disable=dangerous-default-value, invalid-name
     def __init__(
         self,
         depth=1.0,
@@ -148,22 +185,32 @@ class YOLOPAFPN(nn.Module):
 
 
 class YOLOXHead(nn.Module):
+    """Decoupled head.
+
+    The decoupled head contains two parallel branches for classification and
+    regression tasks. An IoU branch is added to the regression branch after
+    the conv layers.
+    """
+
+    # pylint: disable=dangerous-default-value, invalid-name
     def __init__(
         self,
-        num_classes,
-        width=1.0,
-        strides=[8, 16, 32],
-        in_channels=[256, 512, 1024],
-        act="silu",
-        depthwise=False,
-    ):
+        num_classes: int,
+        width: float = 1.0,
+        strides: List[int] = [8, 16, 32],
+        in_channels: List[int] = [256, 512, 1024],
+        act: str = "silu",
+        depthwise: bool = False,
+    ) -> None:
         """
         Args:
-            act (str): activation type of conv. Defalut value: "silu".
-            depthwise (bool): whether apply depthwise conv in conv branch. Defalut value: False.
+            act (str): activation type of conv. Default: "silu".
+            depthwise (bool): Flag to determine whether to apply depthwise
+                conv in conv branch. Default: False.
         """
         super().__init__()
 
+        self.sizes: List[torch.Size]
         self.n_anchors = 1
         self.num_classes = num_classes
         self.decode_in_inference = True  # for deploy, set to False
@@ -257,20 +304,9 @@ class YOLOXHead(nn.Module):
         self.strides = strides
         self.grids = [torch.zeros(1)] * len(in_channels)
 
-    def initialize_biases(self, prior_prob):
-        for conv in self.cls_preds:
-            b = conv.bias.view(self.n_anchors, -1)
-            b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
-            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
-
-        for conv in self.obj_preds:
-            b = conv.bias.view(self.n_anchors, -1)
-            b.data.fill_(-math.log((1 - prior_prob) / prior_prob))
-            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
-
-    def forward(self, xin):
+    def forward(self, xin: Tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Defines the computation performed at every call"""
         outputs = []
-
         for k, (cls_conv, reg_conv, x) in enumerate(
             zip(self.cls_convs, self.reg_convs, xin)
         ):
@@ -288,52 +324,31 @@ class YOLOXHead(nn.Module):
             output = torch.cat(
                 [reg_output, obj_output.sigmoid(), cls_output.sigmoid()], 1
             )
-
             outputs.append(output)
 
-        self.hw = [x.shape[-2:] for x in outputs]
+        self.sizes = [x.shape[-2:] for x in outputs]
         # [batch, n_anchors_all, 85]
-        outputs = torch.cat([x.flatten(start_dim=2) for x in outputs], dim=2).permute(
-            0, 2, 1
-        )
+        outputs_tensor = torch.cat(
+            [x.flatten(start_dim=2) for x in outputs], dim=2
+        ).permute(0, 2, 1)
         if self.decode_in_inference:
-            return self.decode_outputs(outputs, dtype=xin[0].type())
-        else:
-            return outputs
+            outputs_tensor = self.decode_outputs(outputs_tensor, dtype=xin[0].type())
+        return outputs_tensor
 
-    def get_output_and_grid(self, output, k, stride, dtype):
-        grid = self.grids[k]
-
-        batch_size = output.shape[0]
-        n_ch = 5 + self.num_classes
-        hsize, wsize = output.shape[-2:]
-        if grid.shape[2:4] != output.shape[2:4]:
-            yv, xv = torch.meshgrid([torch.arange(hsize), torch.arange(wsize)])
-            grid = torch.stack((xv, yv), 2).view(1, 1, hsize, wsize, 2).type(dtype)
-            self.grids[k] = grid
-
-        output = output.view(batch_size, self.n_anchors, n_ch, hsize, wsize)
-        output = output.permute(0, 1, 3, 4, 2).reshape(
-            batch_size, self.n_anchors * hsize * wsize, -1
-        )
-        grid = grid.view(1, -1, 2)
-        output[..., :2] = (output[..., :2] + grid) * stride
-        output[..., 2:4] = torch.exp(output[..., 2:4]) * stride
-        return output, grid
-
-    def decode_outputs(self, outputs, dtype):
+    def decode_outputs(self, outputs: torch.Tensor, dtype: str) -> torch.Tensor:
+        """Converts raw output to [x, y, w, h] format."""
         grids = []
         strides = []
-        for (hsize, wsize), stride in zip(self.hw, self.strides):
+        for (hsize, wsize), stride in zip(self.sizes, self.strides):
             yv, xv = torch.meshgrid([torch.arange(hsize), torch.arange(wsize)])
             grid = torch.stack((xv, yv), 2).view(1, -1, 2)
             grids.append(grid)
             shape = grid.shape[:2]
             strides.append(torch.full((*shape, 1), stride))
 
-        grids = torch.cat(grids, dim=1).type(dtype)
-        strides = torch.cat(strides, dim=1).type(dtype)
+        grids_tensor = torch.cat(grids, dim=1).type(dtype)
+        strides_tensor = torch.cat(strides, dim=1).type(dtype)
 
-        outputs[..., :2] = (outputs[..., :2] + grids) * strides
-        outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides
+        outputs[..., :2] = (outputs[..., :2] + grids_tensor) * strides_tensor
+        outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides_tensor
         return outputs

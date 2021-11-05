@@ -19,12 +19,6 @@ iou_threshold: 0.45
 score_threshold: 0.25
 
 fp16: false
+fuse: false
 use_gpu: true
-# save_result: true
 
-# ckpt: weights/yolox_l.pth
-# exp_file: null
-
-# fuse: false
-# legacy: false
-# trt: false

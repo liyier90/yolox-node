@@ -29,37 +29,20 @@
 """Network blocks for constructing the YOLOX model
 
 Modifications include:
+- BaseConv
+    - Removed get_activations, uses SiLU only
+    - Removed groups and bias arguments, uses group=1 and bias=False for
+        nn.Conv2d only
 - Remove SiLU export-friendly class
-- Removed ReLU and LeakyReLU activation functions
-- ResLayer class
+- Removed unused DWConv and ResLayer class
+- Removed depthwise and act arguments
+- Refactor and formatting
 """
 
 from typing import Tuple
 
 import torch
 import torch.nn as nn
-
-
-def get_activation(name: str = "silu", inplace: bool = True) -> nn.SiLU:
-    """The activation function.
-
-    Args:
-        name (str): Name of the activation function. Default: "silu".
-        inplace (bool): Flag for whether to do the operation in-place.
-            Default: True
-
-    Returns:
-        (nn.Module): Activation function.
-
-    Raises:
-        AttributeError: When requesting an activation function other than
-            "silu"
-    """
-    if name == "silu":
-        module = nn.SiLU(inplace=inplace)
-    else:
-        raise AttributeError("Unsupported act type: {}".format(name))
-    return module
 
 
 class BaseConv(nn.Module):
@@ -72,24 +55,13 @@ class BaseConv(nn.Module):
         out_channels: int,
         ksize: int,
         stride: int,
-        groups: int = 1,
-        bias: bool = False,
-        act: str = "silu",
     ) -> None:
         super().__init__()
         # same padding
         pad = (ksize - 1) // 2
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=ksize,
-            stride=stride,
-            padding=pad,
-            groups=groups,
-            bias=bias,
-        )
+        self.conv = nn.Conv2d(in_channels, out_channels, ksize, stride, pad, bias=False)
         self.bn = nn.BatchNorm2d(out_channels)
-        self.act = get_activation(act, inplace=True)
+        self.act = nn.SiLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
@@ -102,37 +74,6 @@ class BaseConv(nn.Module):
         return self.act(self.conv(x))
 
 
-class DWConv(nn.Module):
-    """Depthwise Conv + Conv"""
-
-    # pylint: disable=invalid-name, too-many-arguments
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        ksize: int,
-        stride: int = 1,
-        act: str = "silu",
-    ) -> None:
-        super().__init__()
-        self.dconv = BaseConv(
-            in_channels,
-            in_channels,
-            ksize=ksize,
-            stride=stride,
-            groups=in_channels,
-            act=act,
-        )
-        self.pconv = BaseConv(
-            in_channels, out_channels, ksize=1, stride=1, groups=1, act=act
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Defines the computation performed at every call"""
-        x = self.dconv(x)
-        return self.pconv(x)
-
-
 class Bottleneck(nn.Module):
     """Standard bottleneck."""
 
@@ -143,14 +84,11 @@ class Bottleneck(nn.Module):
         out_channels: int,
         shortcut: bool = True,
         expansion: float = 0.5,
-        depthwise: bool = False,
-        act: str = "silu",
     ) -> None:
         super().__init__()
         hidden_channels = int(out_channels * expansion)
-        Conv = DWConv if depthwise else BaseConv
-        self.conv1 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=act)
-        self.conv2 = Conv(hidden_channels, out_channels, 3, stride=1, act=act)
+        self.conv1 = BaseConv(in_channels, hidden_channels, 1, 1)
+        self.conv2 = BaseConv(hidden_channels, out_channels, 3, 1)
         self.use_add = shortcut and in_channels == out_channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -170,19 +108,13 @@ class SPPBottleneck(nn.Module):
         in_channels: int,
         out_channels: int,
         kernel_sizes: Tuple[int, int, int] = (5, 9, 13),
-        activation: str = "silu",
     ) -> None:
         super().__init__()
         hidden_channels = in_channels // 2
-        self.conv1 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=activation)
-        self.m = nn.ModuleList(
-            [
-                nn.MaxPool2d(kernel_size=ks, stride=1, padding=ks // 2)
-                for ks in kernel_sizes
-            ]
-        )
+        self.conv1 = BaseConv(in_channels, hidden_channels, 1, 1)
+        self.m = nn.ModuleList([nn.MaxPool2d(ks, 1, ks // 2) for ks in kernel_sizes])
         conv2_channels = hidden_channels * (len(kernel_sizes) + 1)
-        self.conv2 = BaseConv(conv2_channels, out_channels, 1, stride=1, act=activation)
+        self.conv2 = BaseConv(conv2_channels, out_channels, 1, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
@@ -203,8 +135,6 @@ class CSPLayer(nn.Module):
         n: int = 1,
         shortcut: bool = True,
         expansion: float = 0.5,
-        depthwise: bool = False,
-        act: str = "silu",
     ) -> None:
         """
         Args:
@@ -215,13 +145,11 @@ class CSPLayer(nn.Module):
         # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
         hidden_channels = int(out_channels * expansion)  # hidden channels
-        self.conv1 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=act)
-        self.conv2 = BaseConv(in_channels, hidden_channels, 1, stride=1, act=act)
-        self.conv3 = BaseConv(2 * hidden_channels, out_channels, 1, stride=1, act=act)
+        self.conv1 = BaseConv(in_channels, hidden_channels, 1, 1)
+        self.conv2 = BaseConv(in_channels, hidden_channels, 1, 1)
+        self.conv3 = BaseConv(2 * hidden_channels, out_channels, 1, 1)
         module_list = [
-            Bottleneck(
-                hidden_channels, hidden_channels, shortcut, 1.0, depthwise, act=act
-            )
+            Bottleneck(hidden_channels, hidden_channels, shortcut, 1.0)
             for _ in range(n)
         ]
         self.m = nn.Sequential(*module_list)
@@ -245,10 +173,9 @@ class Focus(nn.Module):
         out_channels: int,
         ksize: int = 1,
         stride: int = 1,
-        act: str = "silu",
     ) -> None:
         super().__init__()
-        self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride, act=act)
+        self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
@@ -258,12 +185,6 @@ class Focus(nn.Module):
         patch_bot_left = x[..., 1::2, ::2]
         patch_bot_right = x[..., 1::2, 1::2]
         x = torch.cat(
-            (
-                patch_top_left,
-                patch_bot_left,
-                patch_top_right,
-                patch_bot_right,
-            ),
-            dim=1,
+            (patch_top_left, patch_bot_left, patch_top_right, patch_bot_right), dim=1
         )
         return self.conv(x)

@@ -29,7 +29,7 @@ from .utils import fuse_model, xywh2xyxy, xyxy2xyxyn
 NUM_CHANNELS = 3
 
 
-class Detector:
+class Detector:  # pylint: disable=too-few-public-methods
     """Object detection class using YOLOX to predict object bboxes.
 
     Attributes:
@@ -47,7 +47,6 @@ class Detector:
         self.logger = logging.getLogger(__name__)
 
         self.config = config
-        self.root_dir = config["root"]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Half-precision only supported on CUDA
         self.half = self.config["half"] and self.device.type != "cpu"
@@ -104,7 +103,7 @@ class Detector:
             self.detect_ids = self.detect_ids.half()
         self.input_size = (self.config["input_size"], self.config["input_size"])
         model_type = self.config["model_type"]
-        model_path = (self.root_dir / self.config["model_files"][model_type]).resolve()
+        model_path = (self.config["root"] / self.config["model_files"][model_type]).resolve()
         model_sizes = self.config["model_sizes"][model_type]
 
         self.logger.info(

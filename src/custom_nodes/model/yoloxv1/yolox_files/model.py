@@ -47,7 +47,7 @@ import torch
 import torch.nn as nn
 
 from .darknet import CSPDarknet
-from .network_blocks import BaseConv, CSPLayer, DWConv
+from .network_blocks import BaseConv, CSPLayer
 
 IN_CHANNELS = [256, 512, 1024]
 
@@ -66,8 +66,8 @@ class YOLOX(nn.Module):
         width: float,
     ) -> None:
         super().__init__()
-        self.backbone = YOLOPAFPN(depth, width, in_channels=IN_CHANNELS)
-        self.head = YOLOXHead(num_classes, width, in_channels=IN_CHANNELS)
+        self.backbone = YOLOPAFPN(depth, width)
+        self.head = YOLOXHead(num_classes, width)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
@@ -76,7 +76,7 @@ class YOLOX(nn.Module):
         return self.head(fpn_outs)
 
 
-class YOLOPAFPN(nn.Module):
+class YOLOPAFPN(nn.Module):  # pylint: disable=too-many-instance-attributes
     """
     YOLOv3 model. Darknet 53 is the default backbone of this model.
     """
@@ -84,71 +84,57 @@ class YOLOPAFPN(nn.Module):
     # pylint: disable=dangerous-default-value, invalid-name
     def __init__(
         self,
-        depth=1.0,
-        width=1.0,
-        in_features=("dark3", "dark4", "dark5"),
-        in_channels=[256, 512, 1024],
-        depthwise=False,
-        act="silu",
+        depth: float = 1.0,
+        width: float = 1.0,
     ):
         super().__init__()
-        self.backbone = CSPDarknet(depth, width, depthwise=depthwise, act=act)
-        self.in_features = in_features
-        self.in_channels = in_channels
-        Conv = DWConv if depthwise else BaseConv
+        n_bottleneck = round(3 * depth)
+        self.in_features = ("dark3", "dark4", "dark5")
+        self.backbone = CSPDarknet(depth, width, self.in_features)
 
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
         self.lateral_conv0 = BaseConv(
-            int(in_channels[2] * width), int(in_channels[1] * width), 1, 1, act=act
+            int(IN_CHANNELS[2] * width), int(IN_CHANNELS[1] * width), 1, 1
         )
-        self.C3_p4 = CSPLayer(
-            int(2 * in_channels[1] * width),
-            int(in_channels[1] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
-        )  # cat
+        self.C3_p4 = self.make_csp_layer(
+            IN_CHANNELS[1], IN_CHANNELS[1], n_bottleneck, width
+        )
 
         self.reduce_conv1 = BaseConv(
-            int(in_channels[1] * width), int(in_channels[0] * width), 1, 1, act=act
+            int(IN_CHANNELS[1] * width), int(IN_CHANNELS[0] * width), 1, 1
         )
-        self.C3_p3 = CSPLayer(
-            int(2 * in_channels[0] * width),
-            int(in_channels[0] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
+        self.C3_p3 = self.make_csp_layer(
+            IN_CHANNELS[0], IN_CHANNELS[0], n_bottleneck, width
         )
 
         # bottom-up conv
-        self.bu_conv2 = Conv(
-            int(in_channels[0] * width), int(in_channels[0] * width), 3, 2, act=act
+        self.bu_conv2 = BaseConv(
+            int(IN_CHANNELS[0] * width), int(IN_CHANNELS[0] * width), 3, 2
         )
-        self.C3_n3 = CSPLayer(
-            int(2 * in_channels[0] * width),
-            int(in_channels[1] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
+        self.C3_n3 = self.make_csp_layer(
+            IN_CHANNELS[0], IN_CHANNELS[1], n_bottleneck, width
         )
 
         # bottom-up conv
-        self.bu_conv1 = Conv(
-            int(in_channels[1] * width), int(in_channels[1] * width), 3, 2, act=act
+        self.bu_conv1 = BaseConv(
+            int(IN_CHANNELS[1] * width), int(IN_CHANNELS[1] * width), 3, 2
         )
-        self.C3_n4 = CSPLayer(
-            int(2 * in_channels[1] * width),
-            int(in_channels[2] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
+        self.C3_n4 = self.make_csp_layer(
+            IN_CHANNELS[1], IN_CHANNELS[2], n_bottleneck, width
         )
 
-    def forward(self, inputs):
+    @staticmethod
+    def make_csp_layer(
+        in_channel: int, out_channel: int, depth: int, width: float
+    ) -> CSPLayer:
+        """Returns a CSPLayer"""
+        return CSPLayer(
+            int(2 * in_channel * width), int(out_channel * width), depth, False
+        )
+
+    def forward(
+        self, inputs: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             inputs: input images.
@@ -156,11 +142,9 @@ class YOLOPAFPN(nn.Module):
         Returns:
             Tuple[Tensor]: FPN feature.
         """
-
         #  backbone
         out_features = self.backbone(inputs)
-        features = [out_features[f] for f in self.in_features]
-        [x2, x1, x0] = features
+        [x2, x1, x0] = [out_features[f] for f in self.in_features]
 
         fpn_out0 = self.lateral_conv0(x0)  # 1024->512/32
         f_out0 = self.upsample(fpn_out0)  # 512/16
@@ -180,11 +164,10 @@ class YOLOPAFPN(nn.Module):
         p_out0 = torch.cat([p_out0, fpn_out0], 1)  # 512->1024/32
         pan_out0 = self.C3_n4(p_out0)  # 1024->1024/32
 
-        outputs = (pan_out2, pan_out1, pan_out0)
-        return outputs
+        return pan_out2, pan_out1, pan_out0
 
 
-class YOLOXHead(nn.Module):
+class YOLOXHead(nn.Module):  # pylint: disable=too-many-instance-attributes
     """Decoupled head.
 
     The decoupled head contains two parallel branches for classification and
@@ -198,9 +181,6 @@ class YOLOXHead(nn.Module):
         num_classes: int,
         width: float = 1.0,
         strides: List[int] = [8, 16, 32],
-        in_channels: List[int] = [256, 512, 1024],
-        act: str = "silu",
-        depthwise: bool = False,
     ) -> None:
         """
         Args:
@@ -211,9 +191,9 @@ class YOLOXHead(nn.Module):
         super().__init__()
 
         self.sizes: List[torch.Size]
+        feat_channels = int(256 * width)
         self.n_anchors = 1
         self.num_classes = num_classes
-        self.decode_in_inference = True  # for deploy, set to False
 
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
@@ -221,103 +201,42 @@ class YOLOXHead(nn.Module):
         self.reg_preds = nn.ModuleList()
         self.obj_preds = nn.ModuleList()
         self.stems = nn.ModuleList()
-        Conv = DWConv if depthwise else BaseConv
 
-        for in_channel in in_channels:
-            self.stems.append(
-                BaseConv(
-                    in_channels=int(in_channel * width),
-                    out_channels=int(256 * width),
-                    ksize=1,
-                    stride=1,
-                    act=act,
-                )
-            )
-            self.cls_convs.append(
-                nn.Sequential(
-                    *[
-                        Conv(
-                            in_channels=int(256 * width),
-                            out_channels=int(256 * width),
-                            ksize=3,
-                            stride=1,
-                            act=act,
-                        ),
-                        Conv(
-                            in_channels=int(256 * width),
-                            out_channels=int(256 * width),
-                            ksize=3,
-                            stride=1,
-                            act=act,
-                        ),
-                    ]
-                )
-            )
-            self.reg_convs.append(
-                nn.Sequential(
-                    *[
-                        Conv(
-                            in_channels=int(256 * width),
-                            out_channels=int(256 * width),
-                            ksize=3,
-                            stride=1,
-                            act=act,
-                        ),
-                        Conv(
-                            in_channels=int(256 * width),
-                            out_channels=int(256 * width),
-                            ksize=3,
-                            stride=1,
-                            act=act,
-                        ),
-                    ]
-                )
-            )
+        for in_channel in IN_CHANNELS:
+            self.stems.append(BaseConv(int(in_channel * width), feat_channels, 1, 1))
+            self.cls_convs.append(nn.Sequential(*self.make_group_layer(feat_channels)))
+            self.reg_convs.append(nn.Sequential(*self.make_group_layer(feat_channels)))
             self.cls_preds.append(
-                nn.Conv2d(
-                    in_channels=int(256 * width),
-                    out_channels=self.n_anchors * self.num_classes,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                )
+                nn.Conv2d(feat_channels, self.n_anchors * self.num_classes, 1, 1, 0)
             )
-            self.reg_preds.append(
-                nn.Conv2d(
-                    in_channels=int(256 * width),
-                    out_channels=4,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                )
-            )
-            self.obj_preds.append(
-                nn.Conv2d(
-                    in_channels=int(256 * width),
-                    out_channels=self.n_anchors * 1,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                )
-            )
+            self.reg_preds.append(nn.Conv2d(feat_channels, 4, 1, 1, 0))
+            self.obj_preds.append(nn.Conv2d(feat_channels, self.n_anchors * 1, 1, 1, 0))
 
         self.strides = strides
-        self.grids = [torch.zeros(1)] * len(in_channels)
+        self.grids = [torch.zeros(1)] * len(IN_CHANNELS)
 
-    def forward(self, xin: Tuple[torch.Tensor, ...]) -> torch.Tensor:
+    @staticmethod
+    def make_group_layer(in_channels: int) -> Tuple[BaseConv, BaseConv]:
+        """2x BaseConv layer"""
+        return (
+            BaseConv(in_channels, in_channels, 3, 1),
+            BaseConv(in_channels, in_channels, 3, 1),
+        )
+
+    def forward(
+        self, xin: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ) -> torch.Tensor:
         """Defines the computation performed at every call"""
         outputs = []
         for k, (cls_conv, reg_conv, x) in enumerate(
             zip(self.cls_convs, self.reg_convs, xin)
         ):
             x = self.stems[k](x)
-            cls_x = x
-            reg_x = x
 
-            cls_feat = cls_conv(cls_x)
+            cls_feat = cls_conv(x)
             cls_output = self.cls_preds[k](cls_feat)
 
-            reg_feat = reg_conv(reg_x)
+            reg_feat = reg_conv(x)
             reg_output = self.reg_preds[k](reg_feat)
             obj_output = self.obj_preds[k](reg_feat)
 
@@ -331,8 +250,8 @@ class YOLOXHead(nn.Module):
         outputs_tensor = torch.cat(
             [x.flatten(start_dim=2) for x in outputs], dim=2
         ).permute(0, 2, 1)
-        if self.decode_in_inference:
-            outputs_tensor = self.decode_outputs(outputs_tensor, dtype=xin[0].type())
+        # Always decode output for inference
+        outputs_tensor = self.decode_outputs(outputs_tensor, xin[0].type())
         return outputs_tensor
 
     def decode_outputs(self, outputs: torch.Tensor, dtype: str) -> torch.Tensor:

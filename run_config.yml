@@ -1,0 +1,11 @@
+nodes:
+  - input.recorded:
+      input_dir: ../YOLOX/data/video/multiple_people.mp4
+      # input_dir: ../YOLOX/data/image/before_frame.jpg
+  - model.yolo
+  # - custom_nodes.model.yolox
+  # - custom_nodes.model.print_bbox
+  - draw.bbox
+  - dabble.fps
+  - output.media_writer:
+      output_dir: PKD_outputs/

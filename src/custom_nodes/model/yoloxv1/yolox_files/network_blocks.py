@@ -33,6 +33,8 @@ Modifications include:
     - Removed get_activations, uses SiLU only
     - Removed groups and bias arguments, uses group=1 and bias=False for
         nn.Conv2d only
+- CSPLayer
+    - Removed expansion, uses 0.5 only
 - Remove SiLU export-friendly class
 - Removed unused DWConv and ResLayer class
 - Removed depthwise and act arguments
@@ -48,7 +50,7 @@ import torch.nn as nn
 class BaseConv(nn.Module):
     """A Conv2d -> Batchnorm -> silu block"""
 
-    # pylint: disable=invalid-name, too-many-arguments
+    # pylint: disable=invalid-name
     def __init__(
         self,
         in_channels: int,
@@ -63,21 +65,20 @@ class BaseConv(nn.Module):
         self.bn = nn.BatchNorm2d(out_channels)
         self.act = nn.SiLU(inplace=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
-        return self.act(self.bn(self.conv(x)))
+        return self.act(self.bn(self.conv(inputs)))
 
-    def fuseforward(self, x: torch.Tensor) -> torch.Tensor:
+    def fuseforward(self, inputs: torch.Tensor) -> torch.Tensor:
         """The computation performed at every call when conv and batch norm
         layers are fused.
         """
-        return self.act(self.conv(x))
+        return self.act(self.conv(inputs))
 
 
 class Bottleneck(nn.Module):
     """Standard bottleneck."""
 
-    # pylint: disable=invalid-name, too-many-arguments
     def __init__(
         self,
         in_channels: int,
@@ -91,12 +92,12 @@ class Bottleneck(nn.Module):
         self.conv2 = BaseConv(hidden_channels, out_channels, 3, 1)
         self.use_add = shortcut and in_channels == out_channels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
-        y = self.conv2(self.conv1(x))
+        ouputs = self.conv2(self.conv1(inputs))
         if self.use_add:
-            y = y + x
-        return y
+            ouputs = ouputs + inputs
+        return ouputs
 
 
 class SPPBottleneck(nn.Module):
@@ -116,25 +117,24 @@ class SPPBottleneck(nn.Module):
         conv2_channels = hidden_channels * (len(kernel_sizes) + 1)
         self.conv2 = BaseConv(conv2_channels, out_channels, 1, 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
-        x = self.conv1(x)
-        x = torch.cat([x] + [m(x) for m in self.m], dim=1)
-        x = self.conv2(x)
-        return x
+        inputs = self.conv1(inputs)
+        inputs = torch.cat([inputs] + [m(inputs) for m in self.m], dim=1)
+        inputs = self.conv2(inputs)
+        return inputs
 
 
 class CSPLayer(nn.Module):
     """C3 in yolov5, CSP Bottleneck with 3 convolutions"""
 
-    # pylint: disable=invalid-name, too-many-arguments
+    # pylint: disable=invalid-name
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        n: int = 1,
+        num_blocks: int = 1,
         shortcut: bool = True,
-        expansion: float = 0.5,
     ) -> None:
         """
         Args:
@@ -144,29 +144,30 @@ class CSPLayer(nn.Module):
         """
         # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
-        hidden_channels = int(out_channels * expansion)  # hidden channels
+        hidden_channels = int(out_channels * 0.5)  # hidden channels
         self.conv1 = BaseConv(in_channels, hidden_channels, 1, 1)
         self.conv2 = BaseConv(in_channels, hidden_channels, 1, 1)
         self.conv3 = BaseConv(2 * hidden_channels, out_channels, 1, 1)
-        module_list = [
-            Bottleneck(hidden_channels, hidden_channels, shortcut, 1.0)
-            for _ in range(n)
-        ]
-        self.m = nn.Sequential(*module_list)
+        self.m = nn.Sequential(
+            *[
+                Bottleneck(hidden_channels, hidden_channels, shortcut, 1.0)
+                for _ in range(num_blocks)
+            ]
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
-        x_1 = self.conv1(x)
-        x_2 = self.conv2(x)
-        x_1 = self.m(x_1)
-        x = torch.cat((x_1, x_2), dim=1)
-        return self.conv3(x)
+        inputs_1 = self.conv1(inputs)
+        inputs_2 = self.conv2(inputs)
+        inputs_1 = self.m(inputs_1)
+        inputs = torch.cat((inputs_1, inputs_2), dim=1)
+        return self.conv3(inputs)
 
 
 class Focus(nn.Module):
     """Focus width and height information into channel space."""
 
-    # pylint: disable=invalid-name, too-many-arguments
+    # pylint: disable=invalid-name
     def __init__(
         self,
         in_channels: int,
@@ -177,14 +178,14 @@ class Focus(nn.Module):
         super().__init__()
         self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Defines the computation performed at every call"""
         # shape of x (b,c,w,h) -> y(b,4c,w/2,h/2)
-        patch_top_left = x[..., ::2, ::2]
-        patch_top_right = x[..., ::2, 1::2]
-        patch_bot_left = x[..., 1::2, ::2]
-        patch_bot_right = x[..., 1::2, 1::2]
-        x = torch.cat(
+        patch_top_left = inputs[..., ::2, ::2]
+        patch_top_right = inputs[..., ::2, 1::2]
+        patch_bot_left = inputs[..., 1::2, ::2]
+        patch_bot_right = inputs[..., 1::2, 1::2]
+        inputs = torch.cat(
             (patch_top_left, patch_bot_left, patch_top_right, patch_bot_right), dim=1
         )
-        return self.conv(x)
+        return self.conv(inputs)
